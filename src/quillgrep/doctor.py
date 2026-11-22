@@ -31,15 +31,21 @@ def run_checks(cfg: Config, client: OllamaClient) -> list[Check]:
         checks.append(Check(False, "Vault", str(e)))
         vault = None
 
-    models = {"embedding": cfg.models.embedding, "chat": cfg.models.chat}
-    if cfg.models.planner:
-        models["planner"] = cfg.models.planner
+    required = {"embedding": cfg.models.embedding, "chat": cfg.models.deep_model}
+    # Optional: when one is missing Quillgrep uses the main model instead, so this never blocks.
+    optional = {"ask": cfg.models.ask_chat, "planner": cfg.models.planner}
     try:
         installed = client.installed_models()
         checks.append(Check(True, f"Ollama is running at {cfg.models.host}"))
-        for role, model in models.items():
+        for role, model in required.items():
             present = any(model_name_matches(model, name) for name in installed)
             checks.append(Check(present, f"Model for {role}: {model}", f"Download it with:  ollama pull {model}"))
+        for role, model in optional.items():
+            if model:
+                present = any(model_name_matches(model, name) for name in installed)
+                checks.append(Check(present, f"Model for {role}: {model}",
+                                    f"Not installed, so the main model is used instead (slower). "
+                                    f"For faster answers:  ollama pull {model}", blocking=False))
     except OllamaError as e:
         checks.append(Check(False, f"Ollama at {cfg.models.host}", str(e)))
 

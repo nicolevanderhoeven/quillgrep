@@ -45,15 +45,26 @@ def default_config_path() -> Path:
 class Models:
     host: str = "http://127.0.0.1:11434"
     embedding: str = "nomic-embed-text"
-    chat: str = "qwen3.5:9b"
-    planner: str = ""  # small/fast model for query planning and re-ranking; empty = use `chat`
-    num_ctx: int = 8192  # context window for `ask`
-    deep_num_ctx: int = 16384  # context window for `deep` and MCP deep mode
+    chat: str = "qwen3.5:9b"  # the main model: writes `deep` answers, and `ask` answers when `ask_chat` is empty
+    ask_chat: str = "qwen3.5:4b"  # a smaller, faster model for `ask`; empty = use `chat`
+    deep_chat: str = ""  # model for `deep`; empty = use `chat`
+    planner: str = "qwen3.5:2b"  # tiny model for planning searches and re-ranking; empty = use the deep model
+    keep_alive: str = "1h"  # how long Ollama keeps a model in memory after use ("30m", "1h", "-1" = forever)
+    num_ctx: int = 8192  # the most context `ask` may use (the window is sized to what is actually sent)
+    deep_num_ctx: int = 16384  # the most context `deep` and MCP deep mode may use
     timeout_seconds: int = 900
 
     @property
+    def ask_model(self) -> str:
+        return self.ask_chat or self.chat
+
+    @property
+    def deep_model(self) -> str:
+        return self.deep_chat or self.chat
+
+    @property
     def planner_model(self) -> str:
-        return self.planner or self.chat
+        return self.planner or self.deep_model
 
 
 @dataclass
@@ -71,10 +82,12 @@ class IndexRules:
 class Retrieval:
     candidates: int = 40  # how many chunks each search stage proposes before fusion
     per_note: int = 3  # per-note excerpt cap: at most this many excerpts from one note
-    excerpts: int = 8  # excerpts the chat model reads in `ask`
+    excerpts: int = 6  # excerpts the chat model reads in `ask`
     deep_excerpts: int = 18  # excerpts the chat model reads in `deep`
     rerank: bool = True  # let the planner model re-rank candidates before answering
-    rerank_pool: int = 30  # candidates sent to the re-ranker
+    rerank_pool: int = 20  # candidates sent to the re-ranker for `ask`
+    deep_rerank_pool: int = 30  # candidates sent to the re-ranker for `deep`
+    concurrency: int = 4  # how many of `deep`'s searches run at the same time
     recency_boost: float = 0.0  # 0 = off. 0.5 = a note edited today scores up to 50% higher
     recency_half_life_days: float = 180.0
     anchor_notes: list[str] = field(default_factory=list)
@@ -94,12 +107,21 @@ class Privacy:
 
 
 @dataclass
+class Output:
+    """How answers look in a terminal."""
+
+    vault_name: str = ""  # the vault's name in Obsidian, used for obsidian:// links; empty = the vault folder's name
+    links: str = "auto"  # clickable note links: "auto" (when the terminal supports them), "always" or "never"
+
+
+@dataclass
 class Config:
     vault: str = ""
     models: Models = field(default_factory=Models)
     index: IndexRules = field(default_factory=IndexRules)
     retrieval: Retrieval = field(default_factory=Retrieval)
     privacy: Privacy = field(default_factory=Privacy)
+    output: Output = field(default_factory=Output)
     path: Path | None = None  # where this config was loaded from (None = defaults)
 
     @property
@@ -116,6 +138,10 @@ class Config:
         return p
 
     @property
+    def obsidian_vault_name(self) -> str:
+        return self.output.vault_name or Path(self.vault).expanduser().name
+
+    @property
     def index_path(self) -> Path:
         """One index file per vault, so several vaults can share a data directory."""
         key = hashlib.sha256(str(self.vault_path.resolve()).encode()).hexdigest()[:10]
@@ -126,7 +152,7 @@ class Config:
         return Path(self.privacy.audit_log).expanduser() if self.privacy.audit_log else data_dir() / "audit.log"
 
 
-_SECTIONS = {"models": Models, "index": IndexRules, "retrieval": Retrieval, "privacy": Privacy}
+_SECTIONS = {"models": Models, "index": IndexRules, "retrieval": Retrieval, "privacy": Privacy, "output": Output}
 
 
 def _fill(obj, table: dict, where: str):
@@ -173,6 +199,8 @@ def load_config(path: str | os.PathLike | None = None, vault: str | None = None)
                 raise ConfigError(f"Unknown top-level setting `{key}` in {path}.")
     elif os.environ.get("QUILLGREP_CONFIG") or path != default_config_path():
         raise ConfigError(f"Config file not found: {path}")
+    if cfg.output.links not in ("auto", "always", "never"):
+        raise ConfigError('`links` in [output] must be "auto", "always" or "never".')
     if vault:
         cfg.vault = vault
     return cfg
@@ -191,9 +219,10 @@ vault = {json.dumps(vault)}
 # Quillgrep talks to a local Ollama install (https://ollama.com). Nothing here ever leaves your computer.
 host = "http://127.0.0.1:11434"
 embedding = "nomic-embed-text"
-chat = "qwen3.5:9b"
-# A smaller, faster model for planning searches and re-ranking. Empty = use `chat`.
-planner = ""
+chat = "qwen3.5:9b"        # the main model: writes `deep` answers
+ask_chat = "qwen3.5:4b"    # a smaller, faster model for `ask`. Empty = use `chat`.
+planner = "qwen3.5:2b"     # a tiny model that plans searches and re-ranks. Empty = use the main model.
+keep_alive = "1h"          # how long Ollama keeps a model in memory between questions
 
 [index]
 # Only index these folders (relative to the vault). Empty = everything.
@@ -216,4 +245,8 @@ excluded_folders = []    # folders the MCP server may never read from, e.g. ["Jo
 show_titles = true       # false = do not even reveal note titles in citations
 redact = ["email", "phone", "number"]   # scrubbed from every answer the MCP server returns
 max_quote_words = 20     # cut verbatim quotes from notes longer than this; 0 = off
+
+[output]
+vault_name = ""          # your vault's name in Obsidian, for clickable note links. Empty = the folder's name
+links = "auto"           # "auto" = clickable links where the terminal supports them; "always" / "never"
 """

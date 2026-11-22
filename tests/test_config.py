@@ -13,7 +13,9 @@ def test_defaults_when_only_vault_is_given(tmp_path):
     cfg = load_config(write(tmp_path, f'vault = "{tmp_path.as_posix()}"'))
     assert cfg.models.embedding == "nomic-embed-text"
     assert cfg.models.chat == "qwen3.5:9b"
-    assert cfg.models.planner_model == "qwen3.5:9b"  # empty planner falls back to the chat model
+    assert cfg.models.ask_model == "qwen3.5:4b" and cfg.models.deep_model == "qwen3.5:9b"
+    assert cfg.models.planner_model == "qwen3.5:2b" and cfg.models.keep_alive == "1h"
+    assert cfg.retrieval.excerpts == 6 and cfg.output.links == "auto"
     assert cfg.index.exclude == [".trash", ".obsidian"]
     assert cfg.retrieval.per_note == 3
     assert cfg.privacy.show_titles is True
@@ -65,3 +67,22 @@ def test_index_path_is_per_vault(tmp_path):
     a.mkdir(), b.mkdir()
     ca, cb = load_config(vault=str(a)), load_config(vault=str(b))
     assert ca.index_path != cb.index_path
+
+
+def test_empty_optional_models_fall_back_to_the_main_model(tmp_path):
+    cfg = load_config(write(tmp_path, '[models]\nchat = "big:9b"\nask_chat = ""\nplanner = ""\n'))
+    assert cfg.models.ask_model == cfg.models.deep_model == cfg.models.planner_model == "big:9b"
+    cfg = load_config(write(tmp_path, '[models]\nchat = "big:9b"\ndeep_chat = "huge:30b"\nplanner = ""\n'))
+    assert cfg.models.deep_model == "huge:30b" and cfg.models.planner_model == "huge:30b"
+
+
+def test_output_settings_and_vault_name(tmp_path):
+    vault = tmp_path / "My Notes"
+    vault.mkdir()
+    cfg = load_config(write(tmp_path, f'vault = "{vault.as_posix()}"'))
+    assert cfg.obsidian_vault_name == "My Notes"  # defaults to the folder's name
+    out = '\n[output]\nvault_name = "Brain"\nlinks = "never"\n'
+    cfg = load_config(write(tmp_path, f'vault = "{vault.as_posix()}"' + out))
+    assert cfg.obsidian_vault_name == "Brain" and cfg.output.links == "never"
+    with pytest.raises(ConfigError, match="links"):
+        load_config(write(tmp_path, '[output]\nlinks = "sometimes"\n'))

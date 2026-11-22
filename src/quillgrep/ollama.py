@@ -35,10 +35,37 @@ def model_name_matches(wanted: str, installed: str) -> bool:
     return False
 
 
+CHARS_PER_TOKEN = 3.0  # a deliberately low estimate (English is nearer 4), so the window is never too small
+CTX_STEPS = (4096, 8192, 16384, 32768, 65536, 131072)
+
+
+def fit_ctx(messages: list[dict], cap: int, reserve: int = 1536) -> int:
+    """A context window sized to what is actually sent, plus `reserve` tokens for the reply.
+
+    Ollama reloads a model when its window changes between calls, so the size snaps to a few coarse steps
+    rather than following the prompt exactly. `cap` (the configured maximum) is never exceeded.
+    """
+    tokens = int(sum(len(m.get("content", "")) for m in messages) / CHARS_PER_TOKEN) + reserve
+    for step in CTX_STEPS:
+        if tokens <= step:
+            return min(step, cap)
+    return cap
+
+
+def keep_alive_value(setting: str | int | float) -> str | int | float:
+    """Ollama wants a number of seconds (int) or a duration string like "1h"; "-1" and "0" are numbers."""
+    text = str(setting).strip()
+    try:
+        return int(text)
+    except ValueError:
+        return text
+
+
 class OllamaClient:
-    def __init__(self, host: str = "http://127.0.0.1:11434", timeout: float = 900):
+    def __init__(self, host: str = "http://127.0.0.1:11434", timeout: float = 900, keep_alive: str = "1h"):
         self.host = host.rstrip("/")
         self.timeout = timeout
+        self.keep_alive = keep_alive_value(keep_alive)
 
     # -- plumbing -------------------------------------------------------------------------------
 
@@ -80,7 +107,7 @@ class OllamaClient:
 
     def embed(self, model: str, texts: list[str]) -> np.ndarray:
         """Embed `texts`; returns an (n, dim) float32 array of unit-length vectors."""
-        data = self._json("/api/embed", {"model": model, "input": texts})
+        data = self._json("/api/embed", {"model": model, "input": texts, "keep_alive": self.keep_alive})
         vecs = np.asarray(data["embeddings"], dtype=np.float32)
         if vecs.ndim != 2 or len(vecs) != len(texts):
             raise OllamaError(f"Ollama returned an unexpected embedding response for model `{model}`.")
@@ -88,20 +115,25 @@ class OllamaClient:
         norms[norms == 0] = 1.0
         return vecs / norms
 
-    def _chat_body(self, model, messages, *, stream, fmt, num_ctx) -> dict:
+    def _chat_body(self, model, messages, *, stream, fmt, num_ctx, max_tokens=None) -> dict:
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "stream": stream,
             "think": False,  # we want the answer, not the model's scratch-pad (and it is much faster)
+            "keep_alive": self.keep_alive,
             "options": {"num_ctx": num_ctx},
         }
+        if max_tokens:
+            body["options"]["num_predict"] = max_tokens
         if fmt:
             body["format"] = fmt
         return body
 
-    def chat(self, model: str, messages: list[dict], *, fmt: str | None = None, num_ctx: int = 8192) -> str:
-        data = self._json("/api/chat", self._chat_body(model, messages, stream=False, fmt=fmt, num_ctx=num_ctx))
+    def chat(self, model: str, messages: list[dict], *, fmt: str | None = None, num_ctx: int = 8192,
+             max_tokens: int | None = None) -> str:
+        body = self._chat_body(model, messages, stream=False, fmt=fmt, num_ctx=num_ctx, max_tokens=max_tokens)
+        data = self._json("/api/chat", body)
         return strip_thinking(data.get("message", {}).get("content", "")).strip()
 
     def chat_stream(self, model: str, messages: list[dict], *, num_ctx: int = 8192) -> Iterator[str]:
@@ -140,6 +172,29 @@ class OllamaClient:
 
 def strip_thinking(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.S)
+
+
+def resolve_models(cfg, client):
+    """Fall back to the main model when an optional one (`ask_chat`, `planner`) is not installed.
+
+    Returns (config to use, notes for the person at the keyboard). The input config is not changed. If Ollama
+    cannot be reached nothing is changed either: the normal readiness check reports that.
+    """
+    import dataclasses
+
+    try:
+        installed = client.installed_models()
+    except OllamaError:
+        return cfg, []
+    models = dataclasses.replace(cfg.models)
+    notes = []
+    for key in ("ask_chat", "planner"):
+        wanted = getattr(models, key)
+        if wanted and not any(model_name_matches(wanted, name) for name in installed):
+            setattr(models, key, "")
+            notes.append(f"The {key.replace('_chat', '')} model `{wanted}` is not installed, so the main model is "
+                         f"used instead. For faster answers: ollama pull {wanted}")
+    return dataclasses.replace(cfg, models=models), notes
 
 
 def check_ready(client, models: list[str]) -> list[str]:

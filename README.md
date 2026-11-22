@@ -34,7 +34,7 @@ local model reads the notes, and only a short written summary goes back. The big
 
 ## Install
 
-You need three things: **Ollama** (runs the AI models), **two models**, and **Quillgrep** itself.
+You need three things: **Ollama** (runs the AI models), **some models**, and **Quillgrep** itself.
 Quillgrep needs Python 3.11 or newer, which is probably already on your computer
 (check with `python3 --version`, or `py --version` on Windows; if not, get it from
 [python.org](https://www.python.org/downloads/)).
@@ -46,11 +46,14 @@ a service or with `ollama serve`).
 
 ```bash
 ollama pull nomic-embed-text   # turns your notes into searchable vectors (about 270 MB)
-ollama pull qwen3.5:9b         # writes the answers (about 7.6 GB; wants roughly 16 GB of RAM)
+ollama pull qwen3.5:9b         # writes `deep` answers (about 7.6 GB; wants roughly 16 GB of RAM)
+ollama pull qwen3.5:4b         # writes `ask` answers, faster (about 4.0 GB)
+ollama pull qwen3.5:2b         # plans searches and re-ranks excerpts, very fast (about 3.1 GB)
 ```
 
-Short on memory? Pick a smaller chat model from <https://ollama.com/search?q=qwen> (`ollama pull <name>`) and
-set `chat = "<name>"` in the config (see [Configuration](#configuration)). Answers will be a little less sharp.
+Only the first two are required. If the 4B or 2B model is not installed, Quillgrep says so and uses the 9B
+model for that job instead, which works but is slower. Which models suit which computer is in
+[Choosing models](#choosing-models-for-your-computer).
 
 **3. Install Quillgrep** with one command, using [pipx](https://pipx.pypa.io) or
 [uv](https://docs.astral.sh/uv/), which put the `quillgrep` command on your path without touching other Python
@@ -90,10 +93,8 @@ quillgrep ask "When is the seed swap and who is bringing what?"
 quillgrep deep "What should I work on this week, given my goals and deadlines?"
 ```
 
-How long things take depends on your machine. On an Apple M2 with 24 GB and `qwen3.5:9b`, `ask` takes about
-a minute (the first one longer, while the model loads into memory), and `deep` takes a few minutes because it
-makes several model calls. Indexing a large vault takes a while the first time; after that only changed notes
-are redone.
+How long things take depends on your machine; `--timing` shows you (see [Speed](#speed)). Indexing a large
+vault takes a while the first time; after that only changed notes are redone.
 
 ## Commands
 
@@ -102,18 +103,51 @@ are redone.
 | `quillgrep init [VAULT]` | Create the config file for your vault and run the first-run check. |
 | `quillgrep doctor` | Check Python, Ollama, the models, the vault and the index. Says what to fix. |
 | `quillgrep index` | Read the vault and update the index. Only new or changed files are processed. `--rebuild` starts over. |
-| `quillgrep ask "question"` | The fast path: hybrid search, re-rank, then a streamed answer that cites its notes. |
-| `quillgrep deep "question"` | For broader questions ("what should I do next?"): a small model splits the question into several searches, results are pooled and re-ranked, and a bigger context is used for the answer. Slower, much better at synthesis. |
+| `quillgrep ask "question"` | The fast path: hybrid search, re-rank, then a streamed answer that cites its notes, written by the smaller `ask_chat` model. |
+| `quillgrep deep "question"` | For broader questions ("what should I do next?"): a tiny planner model splits the question into several searches (run at the same time), results are pooled and re-ranked, and the main model reads more excerpts. Slower, much better at synthesis. |
 | `quillgrep mcp` | Run the [MCP server](#use-it-from-claude-or-other-ai-tools-mcp). `--print-setup` prints how to add it to Claude. |
 | `quillgrep audit` | Show what the MCP server was asked and what it returned. `--verify` checks the log was not edited. |
 | `quillgrep status` | What is in the index. |
 | `quillgrep config` | Where the config file, index and audit log are. |
 
-Useful options for `ask` and `deep`: `--recent` favours recently edited notes (good for "what should I do
-next"), `--no-rerank` skips re-ranking (faster, less precise), `-v` shows what the search did. Global options
-`--config FILE` and `--vault DIR` work with every command.
+Options for `ask` and `deep`:
 
-Answers cite excerpts as `[1]`, `[2]`, and a **Sources** list at the end maps each number to a note path.
+| Option | What it does |
+|---|---|
+| `--recent` | Favour recently edited notes (good for "what should I do next"). |
+| `--no-rerank` | Skip re-ranking (faster, less precise). |
+| `--markdown` | Render the answer as formatted Markdown: real **bold**, headings and lists. This is the default in a terminal. |
+| `--plain` | Print the answer as plain text. This is the default when the output is piped or redirected (`quillgrep ask "..." > answer.txt`). |
+| `--timing` | Print the time to the first word and the total time (and where it went) to stderr. |
+| `-v`, `--verbose` | Show what the search did. |
+
+Global options `--config FILE` and `--vault DIR` work with every command.
+
+Answers cite excerpts as `[1]`, `[2]`, and a **Sources** list at the end maps each number to a note. In a
+terminal that supports hyperlinks (iTerm2, WezTerm, kitty, Ghostty, Windows Terminal, VS Code, GNOME Terminal and
+others) each source is a clickable `obsidian://open` link that opens the note in Obsidian; elsewhere, and when
+piped, it is the plain path. The vault name in the link is the vault folder's name, or `vault_name` under
+`[output]` if Obsidian calls it something else. Set `links = "always"` or `"never"` there to override the
+terminal check.
+
+### Speed
+
+Most of the time an answer takes is the model reading excerpts, so Quillgrep makes that smaller and keeps the
+models ready:
+
+- `ask` uses a smaller model (`ask_chat`, default `qwen3.5:4b`) and reads about 6 excerpts; `deep` uses the main
+  model (`chat`, or `deep_chat`) and reads more.
+- A tiny `planner` model (default `qwen3.5:2b`) splits the question for `deep` and re-ranks excerpts, which the
+  big model used to do.
+- `deep` runs its searches at the same time, and starts on the question while the planner is still thinking.
+- Ollama is asked to keep the models in memory for `keep_alive` (default `1h`), so only the first question after
+  a break pays the loading time.
+- The context window is sized to the question and excerpts that are actually sent (up to `num_ctx` /
+  `deep_num_ctx`), instead of always reserving a large one.
+- The re-ranker only reads the start of each excerpt, and a smaller pool of them.
+
+Run `quillgrep ask --timing "..."` to see the effect on your computer: the line it prints shows the time to the
+first word, the total, and how long planning and searching took.
 
 ### What gets indexed
 
@@ -203,10 +237,13 @@ vault = "/Users/me/Documents/MyVault"     # Windows: "C:/Users/me/Documents/MyVa
 
 [models]
 embedding = "nomic-embed-text"
-chat = "qwen3.5:9b"
-planner = ""            # optional smaller/faster model for planning searches and re-ranking
-num_ctx = 8192          # context window for `ask`
-deep_num_ctx = 16384    # context window for `deep`
+chat = "qwen3.5:9b"     # the main model: writes `deep` answers
+ask_chat = "qwen3.5:4b" # a smaller model for `ask`; empty = use `chat`
+deep_chat = ""          # a different model for `deep`; empty = use `chat`
+planner = "qwen3.5:2b"  # tiny model that plans searches and re-ranks; empty = use the deep model
+keep_alive = "1h"       # how long Ollama keeps models loaded ("30m", "2h", "-1" = until it quits)
+num_ctx = 8192          # the most context `ask` may use (the window is sized to what is sent)
+deep_num_ctx = 16384    # the most context `deep` may use
 
 [index]
 include = []                       # only these folders (empty = everything)
@@ -216,9 +253,11 @@ excalidraw = true
 
 [retrieval]
 per_note = 3            # at most this many excerpts from one note
-excerpts = 8            # excerpts read by `ask`
+excerpts = 6            # excerpts read by `ask`
 deep_excerpts = 18      # excerpts read by `deep`
 rerank = true
+rerank_pool = 20        # candidates the re-ranker looks at for `ask` (`deep_rerank_pool` = 30 for `deep`)
+concurrency = 4         # how many of `deep`'s searches run at once
 recency_boost = 0.0     # 0 = off; 0.5 = a note edited today scores up to 50% higher
 recency_half_life_days = 180
 anchor_notes = ["Goals/OKRs.md", "Conferences"]   # always considered, whatever the question
@@ -228,6 +267,10 @@ excluded_folders = []
 show_titles = true
 redact = ["email", "phone", "number"]
 max_quote_words = 20
+
+[output]
+vault_name = ""         # your vault's name in Obsidian, for clickable links; empty = the folder's name
+links = "auto"          # "auto" = only where the terminal supports links; "always" or "never"
 ```
 
 - **Anchor notes** are notes that matter for many questions (your goals, a list of events, a brag document).
@@ -235,10 +278,28 @@ max_quote_words = 20
   excerpts from each are added to every answer.
 - **Recency boost** favours recently edited notes. Cloud-sync tools sometimes reset modification times, in which
   case the boost cannot tell what is new.
-- **Planner** is useful when your chat model is big and slow: set `planner` to a small, fast model (pull it
-  with `ollama pull`) and it plans searches and re-ranks excerpts much faster than the big one.
+- **Planner** and **ask_chat** are the speed-ups from [Speed](#speed). If either model is not installed,
+  Quillgrep tells you and uses the main model instead; `quillgrep doctor` lists them as optional. Set either to
+  `""` to always use the main model.
+- **keep_alive** trades memory for speed: the models stay loaded for that long. Use `"5m"` on a computer you
+  also need the memory of for other work.
 - Settings that are misspelled are reported by name rather than ignored.
 - `QUILLGREP_CONFIG` (a file) and `QUILLGREP_HOME` (a folder for everything) override the defaults.
+
+### Choosing models for your computer
+
+Quillgrep is built around the Qwen 3.5 family on Ollama. Sizes are approximate downloads; the memory you need is
+the models you use at the same time, plus room for the system. These are starting points, not tested limits.
+
+| Your computer | `chat` (deep) | `ask_chat` | `planner` | Notes |
+|---|---|---|---|---|
+| 8 GB RAM | `qwen3.5:4b` | `qwen3.5:2b` | `qwen3.5:2b` | Everything stays small; `deep` is simpler but quick. Set `keep_alive = "10m"`. |
+| 16 GB (most laptops) | `qwen3.5:9b` | `qwen3.5:4b` | `qwen3.5:2b` | The defaults. |
+| 24-32 GB (for example an M2/M3 Pro or Max) | `qwen3.5:9b` | `qwen3.5:4b` | `qwen3.5:2b` | The defaults, with `keep_alive = "-1"` if you ask all day. |
+| 64 GB or a big GPU | `qwen3.5:27b` | `qwen3.5:9b` | `qwen3.5:4b` | Sharper `deep` answers; lower `deep_num_ctx` if memory is tight. |
+
+If `ask` still feels slow, try `quillgrep ask --timing`, and lower `excerpts` (fewer excerpts read) or use a
+smaller `ask_chat`. If answers feel thin, raise `chat` first: `deep` is where the bigger model pays off.
 
 ### Where files live
 
@@ -257,8 +318,11 @@ Start with `quillgrep doctor`. It checks everything below and prints the fix.
 |---|---|
 | *Could not reach Ollama* | Install it from <https://ollama.com/download>, then start the Ollama app (or run `ollama serve`). |
 | *The model `…` is not installed* | Run the `ollama pull …` command shown. Names must match your config (`chat`, `embedding`, `planner`). |
-| The first answer is very slow | Ollama is loading the model into memory. Later answers are quicker. A smaller `chat` model helps on small machines. |
-| Out of memory, or the computer crawls | Use a smaller chat model, set `planner` to something small, or lower `num_ctx` / `deep_excerpts`. |
+| The first answer is very slow | Ollama is loading the model into memory (`keep_alive` keeps it there afterwards). A smaller `ask_chat` helps on small machines. |
+| *Note: The ask model … is not installed* | Quillgrep is using the main model instead. Run the `ollama pull …` command it printed for faster answers, or set `ask_chat = ""` / `planner = ""` to stop the note. |
+| Out of memory, or the computer crawls | See [Choosing models](#choosing-models-for-your-computer): use smaller models, a shorter `keep_alive`, or lower `num_ctx` / `deep_excerpts`. |
+| The answer shows `**` and `###` | The output is being treated as plain text. Use `quillgrep ask --markdown ...` (or run it in a terminal rather than a pipe). |
+| Source links are not clickable | Your terminal may not support hyperlinks: the plain path is shown instead. Try `links = "always"` under `[output]`, and check `vault_name` matches the vault's name in Obsidian. |
 | "I could not find that in your notes" for something you know is there | Run `quillgrep index` (is it new?). Try `quillgrep deep`, which searches several ways. Check the folder is not in `exclude`. |
 | A PDF is not found | Scanned PDFs have no text and are skipped (no OCR yet). PDFs over 50 MB are skipped (`max_pdf_mb`). |
 | Config error mentioning backslashes | On Windows, write paths as `C:/Users/me/Vault` or in single quotes. |
@@ -284,8 +348,9 @@ Start with `quillgrep doctor`. It checks everything below and prints the fix.
               re-rank (small model scores each excerpt) ─► + anchor notes
                           │
                           ▼
-   ask:  chat model streams a cited answer
-   deep: planner splits the question → several searches pooled → cited answer (bigger context)
+   ask:  smaller chat model streams a cited answer (~6 excerpts)
+   deep: tiny planner splits the question → searches run concurrently, pooled → main model, cited answer
+   output: rendered Markdown in a terminal (streamed), plain text when piped; sources link to obsidian://
    mcp:  same pipeline, then quote limit + redaction + titles only → audit log → the other AI
 ```
 
@@ -294,13 +359,14 @@ words (SQLite FTS5 with BM25 ranking over title, path and text). The two ranked 
 reciprocal-rank fusion, optionally nudged toward recent notes, and capped so no single note crowds out the
 others. A small model then scores the surviving excerpts so the chat model reads fewer, better ones. `deep`
 adds a planning step that turns one broad question into several focused searches plus title keywords, which
-is what makes synthesis questions ("what should I do next given my goals?") work.
+is what makes synthesis questions ("what should I do next given my goals?") work. Each model call asks Ollama
+for a context window just big enough for what is sent, and to keep the model loaded afterwards.
 
 **Why Python.** The goal for this first version was a working, testable engine on all three desktop systems
 that installs with one command. Python gives that fastest: SQLite with FTS5 is in the standard library (one
 embedded database for keyword and vector search, no server), `numpy` does the vector maths, and the
-installers `pipx` and `uv` make `quillgrep` a single command on macOS, Linux and Windows. There are only two
-dependencies (`numpy`, `pypdf`), and the MCP server is a small hand-written JSON-RPC loop on the standard
+installers `pipx` and `uv` make `quillgrep` a single command on macOS, Linux and Windows. There are only three
+dependencies (`numpy`, `pypdf`, and `rich` for terminal formatting), and the MCP server is a small hand-written JSON-RPC loop on the standard
 library rather than a heavy framework, so the whole engine stays easy to bundle.
 
 **With the Tauri desktop app in mind.** Tauri's shell is Rust, but the engine does not need to share its
@@ -318,11 +384,13 @@ for personal vaults; an approximate index is on the roadmap for much larger ones
 **Code map.** `src/quillgrep/`: `config` (settings), `extract` (files → clean text → chunks), `indexer`
 (incremental indexing), `store` (SQLite: notes, chunks, vectors, FTS5), `retrieval` (hybrid search, fusion,
 recency, anchors, per-note cap, re-rank), `answer` (`ask` and `deep`), `ollama` (client and first-run checks),
-`doctor`, `mcp_server`, `privacy` (redaction, quote limit), `audit`, `cli`.
+`render` (terminal output: Markdown, plain text, links), `doctor`, `mcp_server`, `privacy` (redaction, quote limit),
+`audit`, `cli`.
 
 ## Roadmap
 
-Quillgrep is built in stages. **Version 0.1 (this release)** is the engine and command line described above.
+Quillgrep is built in stages. **Version 0.1** is the engine and command line described above, with faster answers
+and formatted terminal output added since.
 
 - **Desktop app** (Tauri) for macOS, Linux and Windows: installers, a first-run wizard, no terminal needed.
 - **Bundled model engine** (llama.cpp) so Ollama is no longer a separate install, plus a **model download

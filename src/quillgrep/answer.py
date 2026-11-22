@@ -7,10 +7,11 @@ import json
 import re
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from .config import Config
-from .ollama import OllamaClient, OllamaError, strip_thinking
+from .ollama import OllamaClient, OllamaError, fit_ctx, strip_thinking
 from .retrieval import Hit, Retriever
 from .store import Store
 
@@ -31,6 +32,7 @@ class Answer:
     keywords: list[str] = field(default_factory=list)
     trace: list[str] = field(default_factory=list)
     seconds: float = 0.0
+    timing: dict[str, float] = field(default_factory=dict)  # seconds: plan (deep), retrieve, first_token, total
 
     def cited(self, fallback: bool = True) -> list[tuple[int, Hit]]:
         """The excerpts the answer actually cites ([n] markers); every excerpt if it cites none and `fallback`."""
@@ -76,8 +78,9 @@ def plan_queries(cfg: Config, client: OllamaClient, question: str) -> tuple[list
         "recent interests). Also give 2 to 4 single keywords likely to appear in relevant note titles. "
         'Reply as JSON: {"queries": [...], "keywords": [...]}.\n\nQuestion: ' + question)
     try:
-        raw = client.chat(cfg.models.planner_model, [{"role": "user", "content": prompt}], fmt="json",
-                          num_ctx=cfg.models.num_ctx)
+        messages = [{"role": "user", "content": prompt}]
+        raw = client.chat(cfg.models.planner_model, messages, fmt="json",
+                          num_ctx=fit_ctx(messages, cfg.models.num_ctx, reserve=768))
         plan = json.loads(raw)
         queries = _strings(plan.get("queries"))[:5]
         keywords = _strings(plan.get("keywords"))[:4]
@@ -86,53 +89,105 @@ def plan_queries(cfg: Config, client: OllamaClient, question: str) -> tuple[list
     return queries, keywords
 
 
-def _generate(cfg: Config, client: OllamaClient, messages: list[dict], num_ctx: int,
+def _generate(client: OllamaClient, model: str, messages: list[dict], cap: int,
               on_text: Callable[[str], None] | None) -> str:
+    num_ctx = fit_ctx(messages, cap)  # only as much window as this prompt needs
     if on_text is None:
-        return client.chat(cfg.models.chat, messages, num_ctx=num_ctx)
+        return client.chat(model, messages, num_ctx=num_ctx)
     parts = []
-    for piece in client.chat_stream(cfg.models.chat, messages, num_ctx=num_ctx):
+    for piece in client.chat_stream(model, messages, num_ctx=num_ctx):
         parts.append(piece)
         on_text(piece)
     return strip_thinking("".join(parts)).strip()
 
 
+class _FirstToken:
+    """Wraps `on_text` to note when the first piece of the answer arrives."""
+
+    def __init__(self, t0: float, on_text: Callable[[str], None] | None):
+        self.t0, self.on_text, self.seconds = t0, on_text, None
+
+    def __call__(self, piece: str) -> None:
+        if self.seconds is None and piece:
+            self.seconds = time.perf_counter() - self.t0
+        self.on_text(piece)
+
+
+def _timing(t0: float, first: _FirstToken | None, **stages: float) -> dict[str, float]:
+    out = dict(stages)
+    if first is not None and first.seconds is not None:
+        out["first_token"] = first.seconds
+    out["total"] = time.perf_counter() - t0
+    return out
+
+
 def ask(cfg: Config, client: OllamaClient, store: Store, question: str, *, recent: bool = False,
         rerank: bool | None = None, on_text: Callable[[str], None] | None = None,
         excluded_folders: list[str] | None = None, synthesis: bool = False) -> Answer:
-    t0 = time.time()
+    t0 = time.perf_counter()
     trace: list[str] = []
     retriever = Retriever(cfg, client, store, excluded_folders=excluded_folders)
-    hits = retriever.retrieve(question, keep=cfg.retrieval.excerpts, recent=recent, rerank=rerank, trace=trace)
+    hits = retriever.retrieve(question, keep=cfg.retrieval.excerpts, recent=recent, rerank=rerank, trace=trace,
+                              pool_size=cfg.retrieval.rerank_pool)
+    retrieved = time.perf_counter() - t0
     if not hits:
         return Answer("I could not find anything in the index. Run `quillgrep index` first.", [], "ask", trace=trace,
-                      seconds=time.time() - t0)
+                      seconds=time.perf_counter() - t0, timing=_timing(t0, None, retrieve=retrieved))
     messages = build_messages(question, hits, deep=False, synthesis=synthesis)
-    text = _generate(cfg, client, messages, cfg.models.num_ctx, on_text)
-    return Answer(text, hits, "ask", trace=trace, seconds=time.time() - t0)
+    first = _FirstToken(t0, on_text) if on_text else None
+    text = _generate(client, cfg.models.ask_model, messages, cfg.models.num_ctx, first)
+    return Answer(text, hits, "ask", trace=trace, seconds=time.perf_counter() - t0,
+                  timing=_timing(t0, first, retrieve=retrieved))
 
 
 def deep(cfg: Config, client: OllamaClient, store: Store, question: str, *, recent: bool = False,
          rerank: bool | None = None, on_text: Callable[[str], None] | None = None,
          excluded_folders: list[str] | None = None, synthesis: bool = False) -> Answer:
-    t0 = time.time()
+    t0 = time.perf_counter()
     trace: list[str] = []
-    queries, keywords = plan_queries(cfg, client, question)
-    trace.append(f"planner split the question into {len(queries)} searches")
     retriever = Retriever(cfg, client, store, excluded_folders=excluded_folders)
+    with ThreadPoolExecutor(max_workers=max(1, cfg.retrieval.concurrency)) as executor:
+        # The question's own search does not depend on the plan, so embed it while the planner is thinking.
+        retriever.prefetch([question], executor)
+        queries, keywords = plan_queries(cfg, client, question)
+        retriever.prefetch(queries, executor)  # ...and the planned searches all at once
+    planned = time.perf_counter() - t0
+    trace.append(f"planner split the question into {len(queries)} searches")
     hits = retriever.retrieve(question, queries=queries, keywords=keywords, keep=cfg.retrieval.deep_excerpts,
-                              recent=recent, rerank=rerank, trace=trace)
+                              recent=recent, rerank=rerank, trace=trace, pool_size=cfg.retrieval.deep_rerank_pool)
+    retrieved = time.perf_counter() - t0 - planned
     if not hits:
         return Answer("I could not find anything in the index. Run `quillgrep index` first.", [], "deep",
-                      queries, keywords, trace, time.time() - t0)
+                      queries, keywords, trace, time.perf_counter() - t0,
+                      timing=_timing(t0, None, plan=planned, retrieve=retrieved))
     messages = build_messages(question, hits, deep=True, synthesis=synthesis)
-    text = _generate(cfg, client, messages, cfg.models.deep_num_ctx, on_text)
-    return Answer(text, hits, "deep", queries, keywords, trace, time.time() - t0)
+    first = _FirstToken(t0, on_text) if on_text else None
+    text = _generate(client, cfg.models.deep_model, messages, cfg.models.deep_num_ctx, first)
+    return Answer(text, hits, "deep", queries, keywords, trace, time.perf_counter() - t0,
+                  timing=_timing(t0, first, plan=planned, retrieve=retrieved))
+
+
+def source_entries(answer: Answer) -> list[tuple[list[int], str]]:
+    """The notes the answer cites, as ([excerpt numbers], note path), in order of first citation."""
+    by_path: dict[str, list[int]] = {}
+    for n, hit in answer.cited():
+        by_path.setdefault(hit.chunk.path, []).append(n)
+    return [(nums, path) for path, nums in by_path.items()]
 
 
 def format_sources(answer: Answer) -> str:
     """`[1][4] Projects/Talk.md` lines for the notes the answer cites."""
-    by_path: dict[str, list[int]] = {}
-    for n, hit in answer.cited():
-        by_path.setdefault(hit.chunk.path, []).append(n)
-    return "\n".join("".join(f"[{n}]" for n in nums) + f" {path}" for path, nums in by_path.items())
+    return "\n".join("".join(f"[{n}]" for n in nums) + f" {path}" for nums, path in source_entries(answer))
+
+
+def format_timing(answer: Answer) -> str:
+    """One line for `--timing`: when the first word appeared, the total, and where the time went."""
+    t = answer.timing
+    parts = []
+    if "first_token" in t:
+        parts.append(f"first token {t['first_token']:.1f}s")
+    parts.append(f"total {t['total']:.1f}s")
+    stages = [f"{name} {t[name]:.1f}s" for name in ("plan", "retrieve") if name in t]
+    if "first_token" in t:
+        stages.append(f"answer {t['total'] - t.get('plan', 0) - t.get('retrieve', 0):.1f}s")
+    return "timing: " + ", ".join(parts) + (" (" + ", ".join(stages) + ")" if stages else "")

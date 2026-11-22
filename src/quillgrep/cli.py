@@ -12,13 +12,13 @@ from pathlib import Path
 from . import __version__
 from .config import Config, ConfigError, default_config_path, load_config, starter_config
 from .doctor import ensure_ready, report, run_checks
-from .ollama import OllamaClient, OllamaError
+from .ollama import OllamaClient, OllamaError, resolve_models
 
 SKIP_DIRS = {"Library", "AppData", "node_modules", ".git", ".cache", "Applications", "Windows", "Program Files"}
 
 
 def _client(cfg: Config) -> OllamaClient:
-    return OllamaClient(cfg.models.host, cfg.models.timeout_seconds)
+    return OllamaClient(cfg.models.host, cfg.models.timeout_seconds, cfg.models.keep_alive)
 
 
 def _open_store(cfg: Config):
@@ -116,14 +116,18 @@ def cmd_index(args, cfg: Config) -> int:
 
 def _run_answer(args, cfg: Config, deep: bool) -> int:
     from . import answer as answer_mod
+    from .render import make_output
 
     cfg.vault_path  # noqa: B018
     client = _client(cfg)
-    models = [cfg.models.embedding, cfg.models.chat]
+    cfg, notes = resolve_models(cfg, client)  # an optional model that is not installed falls back to the main one
+    models = [cfg.models.embedding, cfg.models.deep_model if deep else cfg.models.ask_model]
     if deep or cfg.retrieval.rerank:
         models.append(cfg.models.planner_model)
     if not ensure_ready(cfg, client, models):
         return 2
+    for note in notes:
+        print("Note: " + note, file=sys.stderr)
     store = _open_store(cfg)
     if store.stats()["chunks"] == 0:
         print("Nothing is indexed yet. Run `quillgrep index` first.", file=sys.stderr)
@@ -133,17 +137,16 @@ def _run_answer(args, cfg: Config, deep: bool) -> int:
         print("Please give a question, for example: quillgrep ask \"What did I plan for the talk?\"", file=sys.stderr)
         return 1
     run = answer_mod.deep if deep else answer_mod.ask
-    if deep:
+    out = make_output(args.plain, args.markdown, cfg.output.links)
+    if out.mode == "markdown":
+        out.start("Planning searches, then reading the best excerpts..." if deep else "Searching your notes...")
+    elif deep:
         print("Planning searches, then reading the best excerpts. This can take a few minutes...", file=sys.stderr)
     result = run(cfg, client, store, question, recent=args.recent,
-                 rerank=False if args.no_rerank else None,
-                 on_text=lambda piece: (sys.stdout.write(piece), sys.stdout.flush()))
-    print()
-    sources = answer_mod.format_sources(result)
-    if sources:
-        print("\nSources:\n" + sources)
-    if args.verbose or deep:
-        notes = [f"{result.mode}, {cfg.models.chat}, {result.seconds:.0f}s"]
+                 rerank=False if args.no_rerank else None, on_text=out.write)
+    out.finish(result, cfg.obsidian_vault_name)
+    if args.verbose or deep or args.timing:
+        notes = [f"{result.mode}, {cfg.models.deep_model if deep else cfg.models.ask_model}, {result.seconds:.0f}s"]
         if result.queries:
             notes.append("searches: " + " | ".join(result.queries))
         if result.keywords:
@@ -151,6 +154,8 @@ def _run_answer(args, cfg: Config, deep: bool) -> int:
         if args.verbose:
             notes += result.trace
         print("\n[" + "; ".join(notes) + "]", file=sys.stderr)
+    if args.timing:
+        print(answer_mod.format_timing(result), file=sys.stderr)
     return 0
 
 
@@ -248,6 +253,11 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--recent", action="store_true", help="favour recently edited notes")
         sp.add_argument("--no-rerank", action="store_true", help="skip the re-ranking step (faster, less precise)")
         sp.add_argument("-v", "--verbose", action="store_true", help="show what the search did")
+        sp.add_argument("--timing", action="store_true", help="show the time to the first word and the total time")
+        fmt = sp.add_mutually_exclusive_group()
+        fmt.add_argument("--plain", action="store_true", help="print the answer as plain text (the default when piped)")
+        fmt.add_argument("--markdown", action="store_true",
+                         help="render the answer as formatted Markdown (the default in a terminal)")
     sp = add("mcp", cmd_mcp, "run the MCP server so other AI tools can ask your notes (answers only, never note text)")
     sp.add_argument("--print-setup", action="store_true", help="print how to add Quillgrep to Claude Code / Desktop")
     sp = add("audit", cmd_audit, "show what the MCP server was asked and what it returned")

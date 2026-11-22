@@ -10,6 +10,7 @@ from urllib.parse import quote
 from rich.console import Console, ConsoleOptions, RenderResult
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 
@@ -67,7 +68,14 @@ class _Live:
         self.text = ""
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
-        yield Markdown(self.text)
+        # Never draw more rows than fit on screen: Live cannot erase rows that have scrolled off, and
+        # Live.stop() forces a final "visible" refresh, so the frame itself must stay short enough to clear.
+        lines = console.render_lines(Markdown(self.text), options.update(height=None), pad=False)
+        room = max(1, (options.max_height or console.height) - 1)
+        for i, line in enumerate(lines[-room:]):
+            if i:
+                yield Segment.line()
+            yield from line
 
 
 class PlainOutput:

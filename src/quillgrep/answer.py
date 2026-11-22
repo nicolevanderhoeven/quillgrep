@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from .config import Config
-from .ollama import OllamaClient, OllamaError, fit_ctx, planner_ctx, strip_thinking
+from .ollama import OllamaClient, OllamaError, stage_ctx, strip_thinking
 from .retrieval import Hit, Retriever
 from .store import Store
 
@@ -70,7 +70,7 @@ def _strings(value) -> list[str]:
     return [v.strip() for v in value if isinstance(v, str) and v.strip()] if isinstance(value, list) else []
 
 
-def plan_queries(cfg: Config, client: OllamaClient, question: str) -> tuple[list[str], list[str]]:
+def plan_queries(cfg: Config, client: OllamaClient, question: str, answer_model: str, answer_cap: int) -> tuple[list[str], list[str]]:
     """The planner step: split a question into several searches plus keywords for note titles."""
     prompt = (
         "You help search a personal Obsidian vault. Break this question into 3 to 5 short, separate search queries "
@@ -80,7 +80,7 @@ def plan_queries(cfg: Config, client: OllamaClient, question: str) -> tuple[list
     try:
         messages = [{"role": "user", "content": prompt}]
         raw = client.chat(cfg.models.planner_model, messages, fmt="json",
-                          num_ctx=planner_ctx(cfg.models, messages, 768))
+                          num_ctx=stage_ctx(cfg.models.planner_model, answer_model, messages, answer_cap, 768))
         plan = json.loads(raw)
         queries = _strings(plan.get("queries"))[:5]
         keywords = _strings(plan.get("keywords"))[:4]
@@ -90,8 +90,8 @@ def plan_queries(cfg: Config, client: OllamaClient, question: str) -> tuple[list
 
 
 def _generate(client: OllamaClient, model: str, messages: list[dict], cap: int,
-              on_text: Callable[[str], None] | None) -> str:
-    num_ctx = fit_ctx(messages, cap)  # only as much window as this prompt needs
+              on_text: Callable[[str], None] | None, planner_model: str) -> str:
+    num_ctx = stage_ctx(model, planner_model, messages, cap)
     if on_text is None:
         return client.chat(model, messages, num_ctx=num_ctx)
     parts = []
@@ -126,7 +126,8 @@ def ask(cfg: Config, client: OllamaClient, store: Store, question: str, *, recen
         excluded_folders: list[str] | None = None, synthesis: bool = False) -> Answer:
     t0 = time.perf_counter()
     trace: list[str] = []
-    retriever = Retriever(cfg, client, store, excluded_folders=excluded_folders)
+    retriever = Retriever(cfg, client, store, excluded_folders=excluded_folders,
+                          answer_model=cfg.models.ask_model, answer_cap=cfg.models.num_ctx)
     hits = retriever.retrieve(question, keep=cfg.retrieval.excerpts, recent=recent, rerank=rerank, trace=trace,
                               pool_size=cfg.retrieval.rerank_pool)
     retrieved = time.perf_counter() - t0
@@ -135,7 +136,7 @@ def ask(cfg: Config, client: OllamaClient, store: Store, question: str, *, recen
                       seconds=time.perf_counter() - t0, timing=_timing(t0, None, retrieve=retrieved))
     messages = build_messages(question, hits, deep=False, synthesis=synthesis)
     first = _FirstToken(t0, on_text) if on_text else None
-    text = _generate(client, cfg.models.ask_model, messages, cfg.models.num_ctx, first)
+    text = _generate(client, cfg.models.ask_model, messages, cfg.models.num_ctx, first, cfg.models.planner_model)
     return Answer(text, hits, "ask", trace=trace, seconds=time.perf_counter() - t0,
                   timing=_timing(t0, first, retrieve=retrieved))
 
@@ -145,11 +146,12 @@ def deep(cfg: Config, client: OllamaClient, store: Store, question: str, *, rece
          excluded_folders: list[str] | None = None, synthesis: bool = False) -> Answer:
     t0 = time.perf_counter()
     trace: list[str] = []
-    retriever = Retriever(cfg, client, store, excluded_folders=excluded_folders)
+    retriever = Retriever(cfg, client, store, excluded_folders=excluded_folders,
+                          answer_model=cfg.models.deep_model, answer_cap=cfg.models.deep_num_ctx)
     with ThreadPoolExecutor(max_workers=max(1, cfg.retrieval.concurrency)) as executor:
         # The question's own search does not depend on the plan, so embed it while the planner is thinking.
         retriever.prefetch([question], executor)
-        queries, keywords = plan_queries(cfg, client, question)
+        queries, keywords = plan_queries(cfg, client, question, cfg.models.deep_model, cfg.models.deep_num_ctx)
         retriever.prefetch(queries, executor)  # ...and the planned searches all at once
     planned = time.perf_counter() - t0
     trace.append(f"planner split the question into {len(queries)} searches")
@@ -162,7 +164,7 @@ def deep(cfg: Config, client: OllamaClient, store: Store, question: str, *, rece
                       timing=_timing(t0, None, plan=planned, retrieve=retrieved))
     messages = build_messages(question, hits, deep=True, synthesis=synthesis)
     first = _FirstToken(t0, on_text) if on_text else None
-    text = _generate(client, cfg.models.deep_model, messages, cfg.models.deep_num_ctx, first)
+    text = _generate(client, cfg.models.deep_model, messages, cfg.models.deep_num_ctx, first, cfg.models.planner_model)
     return Answer(text, hits, "deep", queries, keywords, trace, time.perf_counter() - t0,
                   timing=_timing(t0, first, plan=planned, retrieve=retrieved))
 

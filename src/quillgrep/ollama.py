@@ -52,14 +52,10 @@ def fit_ctx(messages: list[dict], cap: int, reserve: int = 1536) -> int:
     return cap
 
 
-def planner_ctx(models, messages: list[dict], reserve: int) -> int:
-    """The window for planner and re-rank calls. When the planner is also the answering model, use that
-    model's full window so Ollama does not reload it between stages."""
-    if models.planner_model == models.deep_model:
-        return models.deep_num_ctx
-    if models.planner_model == models.ask_model:
-        return models.num_ctx
-    return fit_ctx(messages, models.num_ctx, reserve=reserve)
+def stage_ctx(model: str, other_model: str, messages: list[dict], cap: int, reserve: int = 1536) -> int:
+    """The window for one stage. Stages that share a model use the same fixed `cap`, so Ollama does not
+    reload it between them; otherwise the window is sized to the prompt."""
+    return cap if model == other_model else fit_ctx(messages, cap, reserve=reserve)
 
 
 def keep_alive_value(setting: str | int | float) -> str | int | float:

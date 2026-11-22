@@ -157,7 +157,8 @@ def test_the_audit_log_detects_tampering_and_is_append_only(tmp_path):
     AuditLog(path).record("request", n=3)  # a second writer continues the same chain
     assert verify(path) == (True, "4 entries, chain intact.")
     lines = path.read_text().splitlines()
-    path.write_text("\n".join([lines[0], lines[1].replace('"n":1', '"n":9'), *lines[2:]]) + "\n")
+    # bytes, so Windows does not translate the newlines to CRLF (the log itself is always LF)
+    path.write_bytes(("\n".join([lines[0], lines[1].replace('"n":1', '"n":9'), *lines[2:]]) + "\n").encode())
     ok, msg = verify(path)
     assert not ok and "line 3" in msg
     if os.name == "posix":

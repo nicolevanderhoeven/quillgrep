@@ -17,7 +17,7 @@ from . import __version__
 from . import answer as answer_mod
 from .audit import AuditLog
 from .config import Config
-from .ollama import OllamaClient, OllamaError, check_ready
+from .ollama import OllamaClient, check_ready
 from .privacy import clean_for_export, redact
 from .store import Store
 
@@ -139,6 +139,13 @@ class McpServer:
             self.audit.record("response", request=req, returned=message, citations=[], error=error)
             return _text(message, error=True)
 
+        try:
+            return self._answer(args, question, depth, recent, req, refuse)
+        except Exception as e:  # noqa: BLE001 - every exit must be audited and reported to the caller
+            return refuse("The local AI hit an error while answering: " + (str(e).splitlines() or [type(e).__name__])[0],
+                          str(e) or type(e).__name__)
+
+    def _answer(self, args: dict, question, depth, recent: bool, req: str, refuse) -> dict:
         if not isinstance(question, str) or not question.strip():
             return refuse("Please provide a question.", "missing question")
         if len(question) > MAX_QUESTION_CHARS:
@@ -150,16 +157,13 @@ class McpServer:
         if problems:
             return refuse("The local AI is not ready on the user's computer: " + problems[0].splitlines()[0],
                           problems[0])
-        try:
-            store = self.store()
-            if store.stats()["chunks"] == 0:
-                return refuse("No notes are indexed yet. The user needs to run `quillgrep index`.", "empty index")
-            t0 = time.time()
-            run = answer_mod.deep if depth == "deep" else answer_mod.ask
-            result = run(self.cfg, self.client, store, question.strip(), recent=recent, synthesis=True,
-                         excluded_folders=self.cfg.privacy.excluded_folders)
-        except (OllamaError, OSError) as e:
-            return refuse("The local AI hit an error while answering: " + str(e).splitlines()[0], str(e))
+        store = self.store()
+        if store.stats()["chunks"] == 0:
+            return refuse("No notes are indexed yet. The user needs to run `quillgrep index`.", "empty index")
+        t0 = time.time()
+        run = answer_mod.deep if depth == "deep" else answer_mod.ask
+        result = run(self.cfg, self.client, store, question.strip(), recent=recent, synthesis=True,
+                     excluded_folders=self.cfg.privacy.excluded_folders)
         text, citations = self._export(result)
         self.audit.record("response", request=req, returned=text, citations=citations, error=None,
                           excerpts_used=len(result.hits), depth=depth, seconds=round(time.time() - t0, 1))
@@ -172,7 +176,7 @@ class McpServer:
         if not p.show_titles:
             return re.sub(r"\s*\[\d{1,3}\]", "", body).strip(), []
         by_title: dict[str, list[int]] = {}
-        for n, hit in result.cited():
+        for n, hit in result.cited(fallback=False):
             title = redact(hit.chunk.title, p.redact, p.redact_patterns)
             by_title.setdefault(title, []).append(n)
         lines = ["".join(f"[{n}]" for n in nums) + f" {title}" for title, nums in by_title.items()]

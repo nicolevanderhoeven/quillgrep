@@ -67,9 +67,9 @@ def read_text(path: Path, kind: str, rules: IndexRules) -> str:
 
 def _matches(rel: str, patterns: list[str]) -> bool:
     """A rule matches a folder (or file) by prefix, or as a glob such as `Archive/*/old`."""
-    rel = rel.strip("/")
+    rel = rel.strip("/").casefold()
     for pat in patterns:
-        pat = pat.replace("\\", "/").strip("/")
+        pat = pat.replace("\\", "/").strip("/").casefold()
         if not pat:
             continue
         if rel == pat or rel.startswith(pat + "/") or fnmatch.fnmatchcase(rel, pat):

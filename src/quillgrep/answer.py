@@ -32,10 +32,11 @@ class Answer:
     trace: list[str] = field(default_factory=list)
     seconds: float = 0.0
 
-    def cited(self) -> list[tuple[int, Hit]]:
-        """The excerpts the answer actually cites ([n] markers); every excerpt if it cites none."""
+    def cited(self, fallback: bool = True) -> list[tuple[int, Hit]]:
+        """The excerpts the answer actually cites ([n] markers); every excerpt if it cites none and `fallback`."""
         nums = sorted({int(n) for n in re.findall(r"\[(\d{1,3})\]", self.text) if 1 <= int(n) <= len(self.hits)})
-        return [(n, self.hits[n - 1]) for n in nums] or list(enumerate(self.hits, 1))
+        cited = [(n, self.hits[n - 1]) for n in nums]
+        return cited or (list(enumerate(self.hits, 1)) if fallback else [])
 
 
 def excerpts_block(hits: list[Hit], with_paths: bool = True) -> str:

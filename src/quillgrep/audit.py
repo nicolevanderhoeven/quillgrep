@@ -27,29 +27,64 @@ class AuditLog:
                 os.chmod(self.path, 0o600)  # owner only (no effect on Windows, which uses folder permissions)
             except OSError:
                 pass
-        self._last = self._last_hash()
 
-    def _last_hash(self) -> str:
-        last = b""
-        with open(self.path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            f.seek(max(0, size - 65536))
-            for line in f.read().splitlines():
-                if line.strip():
-                    last = line
-        return hashlib.sha256(last).hexdigest() if last else GENESIS
+    @staticmethod
+    def _lock(f) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+
+    @staticmethod
+    def _unlock(f) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _last_hash(f) -> str:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        window = 65536
+        while True:
+            start = max(0, size - window)
+            f.seek(start)
+            lines = [ln for ln in f.read().splitlines() if ln.strip()]
+            if start == 0 or len(lines) > 1:
+                break
+            window *= 4
+        return hashlib.sha256(lines[-1]).hexdigest() if lines else GENESIS
 
     def record(self, event: str, **fields) -> str:
-        """Append one event; returns its id. The line is flushed to disk before returning."""
+        """Append one event; returns its id. The line is flushed to disk before returning.
+
+        Several server processes may share one log, so the previous hash is re-read from the file
+        under an exclusive lock for every append.
+        """
         entry = {"id": uuid.uuid4().hex[:12], "ts": datetime.now(UTC).isoformat(timespec="milliseconds"),
-                 "event": event, **fields, "prev": self._last}
-        line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        with open(self.path, "ab") as f:
-            f.write(line + b"\n")
-            f.flush()
-            os.fsync(f.fileno())
-        self._last = hashlib.sha256(line).hexdigest()
+                 "event": event, **fields}
+        with open(self.path, "a+b") as f:
+            self._lock(f)
+            try:
+                entry["prev"] = self._last_hash(f)
+                line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                f.seek(0, os.SEEK_END)
+                f.write(line + b"\n")
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                self._unlock(f)
         return entry["id"]
 
 

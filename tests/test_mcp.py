@@ -79,6 +79,44 @@ def test_excluded_folders_are_invisible_to_the_mcp_server(make_cfg, indexed):
         assert hidden not in text
 
 
+def test_excluded_folder_names_match_regardless_of_case(make_cfg, indexed):
+    server = McpServer(make_cfg(privacy__excluded_folders=["daily", "REFERENCE", "meetings"]))
+    text, _ = call(server, "ask_notes", question="seed swap Priya heirloom tomatoes Black Krim", depth="deep")
+    for hidden in ("2026-11-18", "2026-11-20", "Seed Catalogue", "Seed Swap Planning"):
+        assert hidden not in text
+
+
+def test_no_sources_are_listed_when_the_answer_cites_none(server, fake):
+    fake.answer = lambda prompt: "Your notes do not say."
+    text, is_error = call(server, "ask_notes", question="what are my goals")
+    assert not is_error and "Sources" not in text
+    assert read_entries(server.cfg.audit_path)[-1]["citations"] == []
+
+
+def test_every_failure_is_audited_and_reported_as_an_error(server, monkeypatch):
+    def boom(*a, **k):
+        raise ValueError("malformed reply")
+
+    monkeypatch.setattr("quillgrep.mcp_server.answer_mod.ask", boom)
+    text, is_error = call(server, "ask_notes", question="what are my goals")
+    assert is_error and text
+    monkeypatch.setattr(McpServer, "store", boom)
+    assert call(server, "ask_notes", question="what are my goals")[1]
+    assert call(server, "notes_status")[1]
+    entries = read_entries(server.cfg.audit_path)
+    assert [e["event"] for e in entries] == ["request", "response"] * 3
+    assert all(e["error"] for e in entries[1::2])
+
+
+def test_audit_chain_survives_two_writers_alternating(tmp_path):
+    path = tmp_path / "audit.log"
+    a, b = AuditLog(path), AuditLog(path)
+    for i in range(3):
+        a.record("request", n=i)
+        b.record("response", n=i)
+    assert verify(path) == (True, "6 entries, chain intact.")
+
+
 def test_titles_can_be_hidden_entirely(make_cfg, indexed):
     server = McpServer(make_cfg(privacy__show_titles=False))
     text, _ = call(server, "ask_notes", question="seed swap")

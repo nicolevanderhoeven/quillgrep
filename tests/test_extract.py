@@ -75,3 +75,8 @@ def test_a_huge_paragraph_is_split_with_overlap():
 def test_short_text_is_one_chunk_and_empty_is_none():
     assert chunk_text("hello") == ["hello"]
     assert chunk_text("  \n ") == []
+
+
+def test_folder_rules_ignore_case(vault):
+    assert not any(p.startswith("Daily") for p in paths(vault, exclude=["daily"]))
+    assert paths(vault, include=["goals"]) == ["Goals/OKRs.md"]

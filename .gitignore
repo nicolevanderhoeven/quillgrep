@@ -1,0 +1,5 @@
+# Allowlist: ignore everything, then unignore project files.
+*
+!*/
+!.gitignore
+!README.md

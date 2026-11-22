@@ -110,7 +110,7 @@ class MarkdownOutput:
 
     def __init__(self, stdout=None, stderr=None, links: str = "auto", force_terminal: bool | None = None):
         stdout = stdout or sys.stdout
-        self.console = Console(file=stdout, highlight=False, force_terminal=force_terminal)
+        self.console = Console(file=stdout, highlight=False, force_terminal=force_terminal, legacy_windows=False)
         self.status_console = Console(file=stderr or sys.stderr, highlight=False)
         self.links = supports_hyperlinks(self.console.is_terminal, setting=links)
         self._body = _Live()

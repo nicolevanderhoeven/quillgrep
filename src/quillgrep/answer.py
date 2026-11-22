@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from .config import Config
-from .ollama import OllamaClient, OllamaError, fit_ctx, strip_thinking
+from .ollama import OllamaClient, OllamaError, fit_ctx, planner_ctx, strip_thinking
 from .retrieval import Hit, Retriever
 from .store import Store
 
@@ -80,7 +80,7 @@ def plan_queries(cfg: Config, client: OllamaClient, question: str) -> tuple[list
     try:
         messages = [{"role": "user", "content": prompt}]
         raw = client.chat(cfg.models.planner_model, messages, fmt="json",
-                          num_ctx=fit_ctx(messages, cfg.models.num_ctx, reserve=768))
+                          num_ctx=planner_ctx(cfg.models, messages, 768))
         plan = json.loads(raw)
         queries = _strings(plan.get("queries"))[:5]
         keywords = _strings(plan.get("keywords"))[:4]

@@ -142,8 +142,12 @@ def _run_answer(args, cfg: Config, deep: bool) -> int:
         out.start("Planning searches, then reading the best excerpts..." if deep else "Searching your notes...")
     elif deep:
         print("Planning searches, then reading the best excerpts. This can take a few minutes...", file=sys.stderr)
-    result = run(cfg, client, store, question, recent=args.recent,
-                 rerank=False if args.no_rerank else None, on_text=out.write)
+    try:
+        result = run(cfg, client, store, question, recent=args.recent,
+                     rerank=False if args.no_rerank else None, on_text=out.write)
+    except BaseException:
+        out.abort()
+        raise
     out.finish(result, cfg.obsidian_vault_name)
     if args.verbose or deep or args.timing:
         notes = [f"{result.mode}, {cfg.models.deep_model if deep else cfg.models.ask_model}, {result.seconds:.0f}s"]

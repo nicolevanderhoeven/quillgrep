@@ -13,7 +13,7 @@ from rich.markdown import Markdown
 from rich.style import Style
 from rich.text import Text
 
-from .answer import Answer, source_entries
+from .answer import Answer, format_sources, source_entries
 
 MARKDOWN, PLAIN = "markdown", "plain"
 
@@ -85,9 +85,12 @@ class PlainOutput:
         self.out.write(piece)
         self.out.flush()
 
+    def abort(self) -> None:
+        pass
+
     def finish(self, answer: Answer, vault_name: str = "") -> None:
         print(file=self.out)
-        sources = "\n".join("".join(f"[{n}]" for n in nums) + f" {path}" for nums, path in source_entries(answer))
+        sources = format_sources(answer)
         if sources:
             print("\nSources:\n" + sources, file=self.out)
 
@@ -116,22 +119,29 @@ class MarkdownOutput:
             self._status.stop()
             self._status = None
 
+    def _stop_live(self) -> None:
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+
     def write(self, piece: str) -> None:
         if self._live is None:
             self._stop_status()
-            self._live = Live(self._body, console=self.console, refresh_per_second=10, vertical_overflow="visible")
+            self._live = Live(self._body, console=self.console, refresh_per_second=10,
+                              vertical_overflow="crop", transient=True)
             self._live.start()
         self._body.text += piece
         self._live.update(self._body)
 
+    def abort(self) -> None:
+        self._stop_status()
+        self._stop_live()
+
     def finish(self, answer: Answer, vault_name: str = "") -> None:
         self._stop_status()
-        if self._live is None:  # nothing streamed (for example, an empty index): show the text we have
-            self._body.text = answer.text
-            self._live = Live(self._body, console=self.console, vertical_overflow="visible")
-            self._live.start()
+        self._stop_live()
         self._body.text = answer.text or self._body.text  # the cleaned-up final text replaces the streamed pieces
-        self._live.stop()
+        self.console.print(Markdown(self._body.text))
         entries = source_entries(answer)
         if entries:
             self.console.print()

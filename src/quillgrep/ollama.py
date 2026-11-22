@@ -52,6 +52,16 @@ def fit_ctx(messages: list[dict], cap: int, reserve: int = 1536) -> int:
     return cap
 
 
+def planner_ctx(models, messages: list[dict], reserve: int) -> int:
+    """The window for planner and re-rank calls. When the planner is also the answering model, use that
+    model's full window so Ollama does not reload it between stages."""
+    if models.planner_model == models.deep_model:
+        return models.deep_num_ctx
+    if models.planner_model == models.ask_model:
+        return models.num_ctx
+    return fit_ctx(messages, models.num_ctx, reserve=reserve)
+
+
 def keep_alive_value(setting: str | int | float) -> str | int | float:
     """Ollama wants a number of seconds (int) or a duration string like "1h"; "-1" and "0" are numbers."""
     text = str(setting).strip()

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .config import Config
-from .ollama import OllamaClient, OllamaError, fit_ctx
+from .ollama import OllamaClient, OllamaError, planner_ctx
 from .store import Chunk, Store
 
 RRF_K = 60  # reciprocal-rank-fusion constant; the usual default
@@ -198,7 +198,7 @@ class Retriever:
         messages = [{"role": "user", "content": prompt}]
         try:
             raw = self.client.chat(self.cfg.models.planner_model, messages, fmt="json",
-                                   num_ctx=fit_ctx(messages, self.cfg.models.num_ctx, reserve=1024),
+                                   num_ctx=planner_ctx(self.cfg.models, messages, 1024),
                                    max_tokens=12 * len(hits) + 40)  # a short reply: the scores and nothing else
             scores = parse_scores(raw, len(hits))
         except (OllamaError, ValueError) as e:

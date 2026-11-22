@@ -18,7 +18,7 @@ def test_ask_prompt_contains_numbered_excerpts_paths_and_question(cfg, client, i
     assert "Question: what are my goals" in prompt
     assert "[1] (" in prompt and ".md)" in prompt
     assert "say so plainly" in prompt  # told not to guess
-    assert fake.chat_calls[-1]["options"]["num_ctx"] == cfg.models.num_ctx
+    assert fake.chat_calls[-1]["options"]["num_ctx"] == 4096  # sized to the prompt, not the 8192 maximum
 
 
 def test_ask_reads_fewer_excerpts_than_it_retrieved(cfg, client, indexed, fake):
@@ -33,12 +33,12 @@ def test_per_note_cap_holds_in_answers(make_cfg, client, indexed):
     assert len(paths) == len(set(paths))
 
 
-def test_deep_plans_searches_pools_results_and_uses_bigger_context(cfg, client, indexed, fake):
+def test_deep_plans_searches_pools_results_and_reads_more_excerpts(cfg, client, indexed, fake):
     result = answer_mod.deep(cfg, client, indexed, "what should I focus on next")
     assert result.queries == fake.plan["queries"] and result.keywords == fake.plan["keywords"]
     assert any("Break this question" in c["messages"][0]["content"] for c in fake.chat_calls)
     final = fake.chat_calls[-1]
-    assert final["options"]["num_ctx"] == cfg.models.deep_num_ctx and final["stream"] is False
+    assert final["options"]["num_ctx"] <= cfg.models.deep_num_ctx and final["stream"] is False
     titles = {h.chunk.title for h in result.hits}
     assert {"Seed Swap Planning", "Conferences", "OKRs"} <= titles  # pooled from several searches + title keywords
     assert "Combine information across them" in final["messages"][0]["content"]

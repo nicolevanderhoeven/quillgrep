@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
   "numpy>=1.26",
   "pypdf>=4.0",
+  "rich>=13.7",
 ]
 
 [project.optional-dependencies]

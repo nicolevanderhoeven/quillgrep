@@ -8,9 +8,10 @@ vault = "/path/to/your/vault"
 # Quillgrep talks to a local Ollama install (https://ollama.com). Nothing here ever leaves your computer.
 host = "http://127.0.0.1:11434"
 embedding = "nomic-embed-text"
-chat = "qwen3.5:9b"
-# A smaller, faster model for planning searches and re-ranking. Empty = use `chat`.
-planner = ""
+chat = "qwen3.5:9b"        # the main model: writes `deep` answers
+ask_chat = "qwen3.5:4b"    # a smaller, faster model for `ask`. Empty = use `chat`.
+planner = "qwen3.5:2b"     # a tiny model that plans searches and re-ranks. Empty = use the main model.
+keep_alive = "1h"          # how long Ollama keeps a model in memory between questions
 
 [index]
 # Only index these folders (relative to the vault). Empty = everything.
@@ -33,3 +34,7 @@ excluded_folders = []    # folders the MCP server may never read from, e.g. ["Jo
 show_titles = true       # false = do not even reveal note titles in citations
 redact = ["email", "phone", "number"]   # scrubbed from every answer the MCP server returns
 max_quote_words = 20     # cut verbatim quotes from notes longer than this; 0 = off
+
+[output]
+vault_name = ""          # your vault's name in Obsidian, for clickable note links. Empty = the folder's name
+links = "auto"           # "auto" = clickable links where the terminal supports them; "always" / "never"

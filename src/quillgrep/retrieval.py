@@ -6,15 +6,17 @@ import json
 import math
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from .config import Config
-from .ollama import OllamaClient, OllamaError
+from .ollama import OllamaClient, OllamaError, stage_ctx
 from .store import Chunk, Store
 
 RRF_K = 60  # reciprocal-rank-fusion constant; the usual default
+RERANK_CHARS = 300  # how much of each excerpt the re-ranker reads; the start is enough to judge relevance
 
 
 @dataclass
@@ -26,8 +28,11 @@ class Hit:
 
 
 class Retriever:
-    def __init__(self, cfg: Config, client: OllamaClient, store: Store, *, excluded_folders: list[str] | None = None):
+    def __init__(self, cfg: Config, client: OllamaClient, store: Store, *, excluded_folders: list[str] | None = None,
+                 answer_model: str | None = None, answer_cap: int | None = None):
         self.cfg = cfg
+        self.answer_model = answer_model or cfg.models.ask_model
+        self.answer_cap = answer_cap or cfg.models.num_ctx
         self.client = client
         self.store = store
         self.excluded = store.excluded_note_ids(excluded_folders or [])
@@ -39,6 +44,15 @@ class Retriever:
         if query not in self._qcache:
             self._qcache[query] = self.client.embed(self.cfg.models.embedding, ["search_query: " + query])[0]
         return self._qcache[query]
+
+    def prefetch(self, queries: list[str], executor: ThreadPoolExecutor) -> list:
+        """Start embedding `queries` on `executor` (the slow, network part of a search) and return the futures.
+
+        The searches themselves then find their vectors already cached. Only the embedding calls run on other
+        threads; the database is still touched from the calling thread alone.
+        """
+        todo = list(dict.fromkeys(q for q in queries if q.strip() and q not in self._qcache))
+        return [executor.submit(self.embed_query, q) for q in todo]
 
     def _allowed(self, note_ids: np.ndarray) -> np.ndarray:
         if not self.excluded:
@@ -98,7 +112,12 @@ class Retriever:
         """Run several searches and merge them fairly: round-robin by rank, then the per-note cap."""
         per_note = per_note or self.cfg.retrieval.per_note
         limit = limit or self.cfg.retrieval.rerank_pool
-        lists = [self.search(q, boost=boost) for q in queries if q.strip()]
+        queries = [q for q in queries if q.strip()]
+        if len(queries) > 1:  # embed all the queries at once; each search then finds its vector ready
+            with ThreadPoolExecutor(max_workers=max(1, self.cfg.retrieval.concurrency)) as executor:
+                for future in self.prefetch(queries, executor):
+                    future.result()
+        lists = [self.search(q, boost=boost) for q in queries]
         merged: list[Hit] = []
         seen: set[int] = set()
         for rank in range(max((len(lst) for lst in lists), default=0)):
@@ -148,11 +167,11 @@ class Retriever:
 
     def retrieve(self, question: str, *, queries: list[str] | None = None, keywords: list[str] | None = None,
                  keep: int, recent: bool = False, rerank: bool | None = None,
-                 trace: list[str] | None = None) -> list[Hit]:
+                 trace: list[str] | None = None, pool_size: int | None = None) -> list[Hit]:
         """Hybrid search -> per-note cap -> re-rank -> add anchors. Returns the excerpts to read, in order."""
         r = self.cfg.retrieval
         boost = max(r.recency_boost, 0.5) if recent else r.recency_boost
-        candidates = self.pool([question, *(queries or [])], keywords=keywords, boost=boost)
+        candidates = self.pool([question, *(queries or [])], keywords=keywords, boost=boost, limit=pool_size)
         if trace is not None:
             trace.append(f"{len(candidates)} candidate excerpts from hybrid search")
         use_rerank = r.rerank if rerank is None else rerank
@@ -172,15 +191,19 @@ class Retriever:
         prompt = (
             "You are helping pick which excerpts from a personal notes vault are useful for answering a question.\n"
             "Rate every excerpt from 0 (unrelated) to 10 (directly helps answer the question).\n"
-            'Reply only with JSON: {"scores": [{"id": 1, "score": 7}, ...]} with one entry per excerpt.\n\n'
+            'Reply only with compact JSON on a single line, one [id, score] pair per excerpt: '
+            '{"scores": [[1, 7], [2, 0], ...]}\n\n'
             f"Question: {question}\n"
             + (f"Also relevant (the question was split into these searches): {' | '.join(topics)}\n" if topics else "")
             + "\n"
-            + "\n\n".join(f"[{i}] ({h.chunk.title})\n{h.chunk.text[:400]}" for i, h in enumerate(hits, 1))
+            + "\n\n".join(f"[{i}] ({h.chunk.title})\n{h.chunk.text[:RERANK_CHARS]}" for i, h in enumerate(hits, 1))
         )
+        messages = [{"role": "user", "content": prompt}]
         try:
-            raw = self.client.chat(self.cfg.models.planner_model, [{"role": "user", "content": prompt}],
-                                   fmt="json", num_ctx=self.cfg.models.num_ctx)
+            ctx = stage_ctx(self.cfg.models.planner_model, self.answer_model, messages, self.answer_cap, 1024)
+            raw = self.client.chat(self.cfg.models.planner_model, messages, fmt="json",
+                                   num_ctx=ctx,
+                                   max_tokens=12 * len(hits) + 40)  # a short reply: the scores and nothing else
             scores = parse_scores(raw, len(hits))
         except (OllamaError, ValueError) as e:
             if trace is not None:
@@ -226,8 +249,8 @@ def parse_scores(raw: str, n: int) -> dict[int, float]:
     out: dict[int, float] = {}
     for item in items:
         try:
-            i, s = int(item["id"]), float(item["score"])
-        except (KeyError, TypeError, ValueError):
+            i, s = (int(item["id"]), float(item["score"])) if isinstance(item, dict) else (int(item[0]), float(item[1]))
+        except (KeyError, IndexError, TypeError, ValueError):
             continue
         if 1 <= i <= n:
             out[i] = s

@@ -17,7 +17,7 @@ from . import __version__
 from . import answer as answer_mod
 from .audit import AuditLog
 from .config import Config
-from .ollama import OllamaClient, check_ready
+from .ollama import OllamaClient, check_ready, resolve_models
 from .privacy import clean_for_export, redact
 from .store import Store
 
@@ -59,7 +59,7 @@ TOOLS = [
 class McpServer:
     def __init__(self, cfg: Config, client: OllamaClient | None = None):
         self.cfg = cfg
-        self.client = client or OllamaClient(cfg.models.host, cfg.models.timeout_seconds)
+        self.client = client or OllamaClient(cfg.models.host, cfg.models.timeout_seconds, cfg.models.keep_alive)
         self.audit = AuditLog(cfg.audit_path)
         self._store: Store | None = None
 
@@ -152,8 +152,9 @@ class McpServer:
             return refuse(f"The question is too long (limit {MAX_QUESTION_CHARS} characters).", "question too long")
         if depth not in ("fast", "deep"):
             return refuse("depth must be 'fast' or 'deep'.", "bad depth")
-        problems = check_ready(self.client, [self.cfg.models.embedding, self.cfg.models.chat,
-                                             self.cfg.models.planner_model])
+        cfg, _ = resolve_models(self.cfg, self.client)  # optional models that are not installed fall back
+        wanted = cfg.models.deep_model if depth == "deep" else cfg.models.ask_model
+        problems = check_ready(self.client, [cfg.models.embedding, wanted, cfg.models.planner_model])
         if problems:
             return refuse("The local AI is not ready on the user's computer: " + problems[0].splitlines()[0],
                           problems[0])
@@ -162,7 +163,7 @@ class McpServer:
             return refuse("No notes are indexed yet. The user needs to run `quillgrep index`.", "empty index")
         t0 = time.time()
         run = answer_mod.deep if depth == "deep" else answer_mod.ask
-        result = run(self.cfg, self.client, store, question.strip(), recent=recent, synthesis=True,
+        result = run(cfg, self.client, store, question.strip(), recent=recent, synthesis=True,
                      excluded_folders=self.cfg.privacy.excluded_folders)
         text, citations = self._export(result)
         self.audit.record("response", request=req, returned=text, citations=citations, error=None,

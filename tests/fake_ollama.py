@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import threading
+import time
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -34,9 +35,15 @@ def embed_text(text: str) -> list[float]:
 
 class FakeOllama:
     def __init__(self):
-        self.installed = ["nomic-embed-text:latest", "qwen3.5:9b"]
+        self.installed = ["nomic-embed-text:latest", "qwen3.5:9b", "qwen3.5:4b", "qwen3.5:2b"]
         self.embed_calls: list[list[str]] = []
         self.chat_calls: list[dict] = []
+        self.embed_bodies: list[dict] = []
+        self.embed_delay = 0.0  # seconds each embedding request takes, to make overlap visible
+        self.chat_delay = 0.0  # seconds each chat request takes
+        self.inflight = 0  # embedding requests being served right now...
+        self.max_inflight = 0  # ...and the most there ever were at once
+        self._lock = threading.Lock()
         self.plan: dict = {
             "queries": ["seed swap date", "conferences cfp deadline"],
             "keywords": ["okr", "conferences"],
@@ -84,10 +91,21 @@ class FakeOllama:
                 if not any(model == n or f"{model}:latest" == n for n in fake.installed):
                     return self._send(404, {"error": f'model "{model}" not found, try pulling it first'})
                 if self.path == "/api/embed":
-                    fake.embed_calls.append(body["input"])
+                    with fake._lock:
+                        fake.embed_calls.append(body["input"])
+                        fake.embed_bodies.append(body)
+                        fake.inflight += 1
+                        fake.max_inflight = max(fake.max_inflight, fake.inflight)
+                    try:
+                        time.sleep(fake.embed_delay)
+                    finally:
+                        with fake._lock:
+                            fake.inflight -= 1
                     self._send(200, {"embeddings": [embed_text(t) for t in body["input"]]})
                 elif self.path == "/api/chat":
-                    fake.chat_calls.append(body)
+                    with fake._lock:
+                        fake.chat_calls.append(body)
+                    time.sleep(fake.chat_delay)
                     text = fake.reply(body)
                     if body.get("stream"):
                         pieces = re.findall(r"\S+\s*", text)

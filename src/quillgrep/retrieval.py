@@ -200,8 +200,9 @@ class Retriever:
         )
         messages = [{"role": "user", "content": prompt}]
         try:
+            ctx = stage_ctx(self.cfg.models.planner_model, self.answer_model, messages, self.answer_cap, 1024)
             raw = self.client.chat(self.cfg.models.planner_model, messages, fmt="json",
-                                   num_ctx=stage_ctx(self.cfg.models.planner_model, self.answer_model, messages, self.answer_cap, 1024),
+                                   num_ctx=ctx,
                                    max_tokens=12 * len(hits) + 40)  # a short reply: the scores and nothing else
             scores = parse_scores(raw, len(hits))
         except (OllamaError, ValueError) as e:

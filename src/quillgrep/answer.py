@@ -70,7 +70,9 @@ def _strings(value) -> list[str]:
     return [v.strip() for v in value if isinstance(v, str) and v.strip()] if isinstance(value, list) else []
 
 
-def plan_queries(cfg: Config, client: OllamaClient, question: str, answer_model: str, answer_cap: int) -> tuple[list[str], list[str]]:
+def plan_queries(
+    cfg: Config, client: OllamaClient, question: str, answer_model: str, answer_cap: int
+) -> tuple[list[str], list[str]]:
     """The planner step: split a question into several searches plus keywords for note titles."""
     prompt = (
         "You help search a personal Obsidian vault. Break this question into 3 to 5 short, separate search queries "

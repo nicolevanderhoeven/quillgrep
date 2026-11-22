@@ -142,8 +142,8 @@ class McpServer:
         try:
             return self._answer(args, question, depth, recent, req, refuse)
         except Exception as e:  # noqa: BLE001 - every exit must be audited and reported to the caller
-            return refuse("The local AI hit an error while answering: " + (str(e).splitlines() or [type(e).__name__])[0],
-                          str(e) or type(e).__name__)
+            first = (str(e).splitlines() or [type(e).__name__])[0]
+            return refuse("The local AI hit an error while answering: " + first, str(e) or type(e).__name__)
 
     def _answer(self, args: dict, question, depth, recent: bool, req: str, refuse) -> dict:
         if not isinstance(question, str) or not question.strip():

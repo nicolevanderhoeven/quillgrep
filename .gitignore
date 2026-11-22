@@ -1,5 +1,16 @@
 # Allowlist: ignore everything, then unignore project files.
+# Anything new (a vault path, a config with your notes' location, an index,
+# an audit log, a .env file) stays ignored unless it is listed here on purpose.
 *
 !*/
 !.gitignore
 !README.md
+!LICENSE
+!CONTRIBUTING.md
+!pyproject.toml
+!quillgrep.example.toml
+!.github/**
+!src/**/*.py
+!tests/**/*.py
+# Synthetic demo vault used by the docs and tests (no real notes, ever).
+!examples/**

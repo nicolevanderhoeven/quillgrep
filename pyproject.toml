@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quillgrep"
+version = "0.1.0"
+description = "Private, local AI search and answers over your Obsidian vault. Your notes never leave your computer."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Quillgrep contributors" }]
+keywords = ["obsidian", "local-ai", "rag", "ollama", "mcp", "privacy"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Text Processing :: Indexing",
+]
+dependencies = [
+  "numpy>=1.26",
+  "pypdf>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "ruff>=0.6",
+]
+
+[project.scripts]
+quillgrep = "quillgrep.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/nicolevanderhoeven/quillgrep"
+Issues = "https://github.com/nicolevanderhoeven/quillgrep/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quillgrep"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]

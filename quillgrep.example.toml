@@ -1,0 +1,35 @@
+# Quillgrep configuration. Everything except `vault` is optional.
+# Docs: https://github.com/nicolevanderhoeven/quillgrep#configuration
+
+# The folder that holds your Obsidian vault. On Windows use forward slashes (C:/Users/me/Vault).
+vault = "/path/to/your/vault"
+
+[models]
+# Quillgrep talks to a local Ollama install (https://ollama.com). Nothing here ever leaves your computer.
+host = "http://127.0.0.1:11434"
+embedding = "nomic-embed-text"
+chat = "qwen3.5:9b"
+# A smaller, faster model for planning searches and re-ranking. Empty = use `chat`.
+planner = ""
+
+[index]
+# Only index these folders (relative to the vault). Empty = everything.
+include = []
+# Never index these folders. Obsidian's own settings and the trash are skipped by default.
+exclude = [".trash", ".obsidian"]
+pdf = true
+excalidraw = true
+
+[retrieval]
+per_note = 3             # at most this many excerpts from a single note per answer
+rerank = true            # have the planner model pick the best excerpts before answering
+recency_boost = 0.0      # 0 = off; try 0.5 to favour recently edited notes (or use --recent)
+anchor_notes = []        # notes that are always considered, e.g. ["Goals/OKRs.md", "Conferences"]
+
+[privacy]
+# These apply to the MCP server (`quillgrep mcp`), which lets other AI tools ask questions
+# of your notes. They only ever receive a synthesis written by your local model, never note text.
+excluded_folders = []    # folders the MCP server may never read from, e.g. ["Journal", "Private"]
+show_titles = true       # false = do not even reveal note titles in citations
+redact = ["email", "phone", "number"]   # scrubbed from every answer the MCP server returns
+max_quote_words = 20     # cut verbatim quotes from notes longer than this; 0 = off

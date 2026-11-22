@@ -29,7 +29,7 @@ anchor_notes = []        # notes that are always considered, e.g. ["Goals/OKRs.m
 [privacy]
 # These apply to the MCP server (`quillgrep mcp`), which lets other AI tools ask questions
 # of your notes. They only ever receive a synthesis written by your local model, never note text.
-excluded_folders = []    # folders the MCP server may never read from, e.g. ["Journal", "Private"]
+excluded_folders = []    # folders the MCP server may never read from, e.g. ["Journal", "Private"]; case-insensitive
 show_titles = true       # false = do not even reveal note titles in citations
 redact = ["email", "phone", "number"]   # scrubbed from every answer the MCP server returns
 max_quote_words = 20     # cut verbatim quotes from notes longer than this; 0 = off

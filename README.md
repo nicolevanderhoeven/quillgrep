@@ -166,8 +166,8 @@ some clients give up on a tool call after a minute or so. In Claude Code you can
 
 ### What the MCP server shares, and what it never does
 
-**It returns only:** the local model's written answer, and the *titles* of the notes it drew on (unless you turn
-titles off).
+**It returns only:** the local model's written answer, and the *titles* of the notes the answer cites (unless you turn
+titles off). If the answer cites nothing, no titles are returned.
 
 **It never returns:** note text, excerpts, file paths, or folder names. The local model is not even shown file
 names while it writes the answer, so it cannot repeat them.
@@ -176,7 +176,7 @@ Controls, all in the `[privacy]` section of the config:
 
 | Setting | Effect |
 |---|---|
-| `excluded_folders` | Notes in these folders are invisible to the MCP server, as if they did not exist. |
+| `excluded_folders` | Notes in these folders are invisible to the MCP server, as if they did not exist. Case does not matter (`private` also hides `Private/`). |
 | `show_titles` | `false` hides even note titles; answers carry no citations at all. |
 | `redact` | Email addresses (`email`), phone numbers (`phone`) and long digit strings such as account numbers (`number`) are replaced with `[email]`, `[phone]`, `[number]` in every answer and title. |
 | `redact_patterns` | Your own regular expressions to scrub as well. |
